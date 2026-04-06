@@ -97,25 +97,71 @@ def xi_summary(xi):
     return {r:roles.count(r) for r in ["BAT","BOWL","ALL","WK"]}
 
 def ml_predict(team1,team2,venue,t1_form,t2_form,h2h,t1_won,toss_bat):
+    """
+    Symmetrized prediction to eliminate team1 positional bias.
+
+    The XGBoost model was trained with team1/team2 positional features,
+    which causes it to favour whichever team is in the team1 slot.
+    Fix: run the model twice (forward + swapped) and average the probabilities.
+
+      Forward:  team1 in slot1, team2 in slot2  → P_fwd(team1 wins) = prob[1]
+      Reversed: team2 in slot1, team1 in slot2  → P_rev(team1 wins) = prob[0]
+      Final:    average of both estimates
+
+    This removes the slot bias while preserving the real signal from
+    team strength, form, h2h and venue features.
+    """
+    import xgboost as xgb
+
     try:    t1_enc=le_team.transform([team1])[0]
     except: t1_enc=0
     try:    t2_enc=le_team.transform([team2])[0]
     except: t2_enc=0
     try:    v_enc=le_venue.transform([venue])[0]
     except: v_enc=0
+
     vrows=feature_df[feature_df['venue']==venue]
     vtr=float(vrows['venue_toss_rate'].mean()) if len(vrows)>0 else 0.5
     vmc=len(vrows)
-    twb=int((t1_won==1 and toss_bat==1) or (t1_won==0 and toss_bat==0))
     min_s,max_s=feature_df['season'].min(),feature_df['season'].max()
     sn=min((2026-min_s)/(max_s-min_s+1e-9),1.0)
-    row={'team1_enc':t1_enc,'team2_enc':t2_enc,'venue_enc':v_enc,'t1_won_toss':t1_won,'toss_bat_first':toss_bat,'toss_winner_bats':twb,'t1_form':t1_form,'t2_form':t2_form,'form_diff':round(t1_form-t2_form,4),'venue_toss_rate':round(vtr,4),'venue_matches':vmc,'h2h_t1_winrate':h2h,'season_norm':round(sn,4)}
-    df_in=pd.DataFrame([row])[FEATURES]
-    import xgboost as xgb
-    dmat=xgb.DMatrix(df_in)
-    prob=model.predict_proba(df_in)[0]
+
+    # ── Forward pass: team1 in slot1 ─────────────────────────────────────
+    twb_fwd=int((t1_won==1 and toss_bat==1) or (t1_won==0 and toss_bat==0))
+    row_fwd={
+        'team1_enc':t1_enc,'team2_enc':t2_enc,'venue_enc':v_enc,
+        't1_won_toss':t1_won,'toss_bat_first':toss_bat,'toss_winner_bats':twb_fwd,
+        't1_form':t1_form,'t2_form':t2_form,'form_diff':round(t1_form-t2_form,4),
+        'venue_toss_rate':round(vtr,4),'venue_matches':vmc,
+        'h2h_t1_winrate':h2h,'season_norm':round(sn,4)
+    }
+    df_fwd=pd.DataFrame([row_fwd])[FEATURES]
+    prob_fwd=model.predict_proba(df_fwd)[0]
+    p_t1_fwd=prob_fwd[1]   # P(team1 wins) when team1 is in slot1
+
+    # ── Reversed pass: team2 in slot1, team1 in slot2 ────────────────────
+    t1_won_rev=1-t1_won                    # flip toss winner
+    h2h_rev=round(1.0-h2h,4)              # flip h2h to team2's perspective
+    twb_rev=int((t1_won_rev==1 and toss_bat==1) or (t1_won_rev==0 and toss_bat==0))
+    row_rev={
+        'team1_enc':t2_enc,'team2_enc':t1_enc,'venue_enc':v_enc,
+        't1_won_toss':t1_won_rev,'toss_bat_first':toss_bat,'toss_winner_bats':twb_rev,
+        't1_form':t2_form,'t2_form':t1_form,'form_diff':round(t2_form-t1_form,4),
+        'venue_toss_rate':round(vtr,4),'venue_matches':vmc,
+        'h2h_t1_winrate':h2h_rev,'season_norm':round(sn,4)
+    }
+    df_rev=pd.DataFrame([row_rev])[FEATURES]
+    prob_rev=model.predict_proba(df_rev)[0]
+    p_t1_rev=prob_rev[0]   # P(team1 wins) when team1 is in slot2 = P(slot2 wins) = prob[0]
+
+    # ── Average both estimates ────────────────────────────────────────────
+    p_t1=( p_t1_fwd + p_t1_rev ) / 2.0
+    p_t2=1.0 - p_t1
+
+    # SHAP contribs from forward pass (directionally correct for display)
+    dmat=xgb.DMatrix(df_fwd)
     contribs=model.get_booster().predict(dmat,pred_contribs=True)[0]
-    return prob[1],prob[0],dict(zip(FEATURES,contribs[:-1]))
+    return p_t1, p_t2, dict(zip(FEATURES,contribs[:-1]))
 
 def shap_chart(contribs,team1,team2):
     sc=sorted(contribs.items(),key=lambda x:abs(x[1]),reverse=True)[:8]
