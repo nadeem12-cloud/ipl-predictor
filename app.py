@@ -97,71 +97,25 @@ def xi_summary(xi):
     return {r:roles.count(r) for r in ["BAT","BOWL","ALL","WK"]}
 
 def ml_predict(team1,team2,venue,t1_form,t2_form,h2h,t1_won,toss_bat):
-    """
-    Symmetrized prediction to eliminate team1 positional bias.
-
-    The XGBoost model was trained with team1/team2 positional features,
-    which causes it to favour whichever team is in the team1 slot.
-    Fix: run the model twice (forward + swapped) and average the probabilities.
-
-      Forward:  team1 in slot1, team2 in slot2  → P_fwd(team1 wins) = prob[1]
-      Reversed: team2 in slot1, team1 in slot2  → P_rev(team1 wins) = prob[0]
-      Final:    average of both estimates
-
-    This removes the slot bias while preserving the real signal from
-    team strength, form, h2h and venue features.
-    """
-    import xgboost as xgb
-
     try:    t1_enc=le_team.transform([team1])[0]
     except: t1_enc=0
     try:    t2_enc=le_team.transform([team2])[0]
     except: t2_enc=0
     try:    v_enc=le_venue.transform([venue])[0]
     except: v_enc=0
-
     vrows=feature_df[feature_df['venue']==venue]
     vtr=float(vrows['venue_toss_rate'].mean()) if len(vrows)>0 else 0.5
     vmc=len(vrows)
+    twb=int((t1_won==1 and toss_bat==1) or (t1_won==0 and toss_bat==0))
     min_s,max_s=feature_df['season'].min(),feature_df['season'].max()
     sn=min((2026-min_s)/(max_s-min_s+1e-9),1.0)
-
-    # ── Forward pass: team1 in slot1 ─────────────────────────────────────
-    twb_fwd=int((t1_won==1 and toss_bat==1) or (t1_won==0 and toss_bat==0))
-    row_fwd={
-        'team1_enc':t1_enc,'team2_enc':t2_enc,'venue_enc':v_enc,
-        't1_won_toss':t1_won,'toss_bat_first':toss_bat,'toss_winner_bats':twb_fwd,
-        't1_form':t1_form,'t2_form':t2_form,'form_diff':round(t1_form-t2_form,4),
-        'venue_toss_rate':round(vtr,4),'venue_matches':vmc,
-        'h2h_t1_winrate':h2h,'season_norm':round(sn,4)
-    }
-    df_fwd=pd.DataFrame([row_fwd])[FEATURES]
-    prob_fwd=model.predict_proba(df_fwd)[0]
-    p_t1_fwd=prob_fwd[1]   # P(team1 wins) when team1 is in slot1
-
-    # ── Reversed pass: team2 in slot1, team1 in slot2 ────────────────────
-    t1_won_rev=1-t1_won                    # flip toss winner
-    h2h_rev=round(1.0-h2h,4)              # flip h2h to team2's perspective
-    twb_rev=int((t1_won_rev==1 and toss_bat==1) or (t1_won_rev==0 and toss_bat==0))
-    row_rev={
-        'team1_enc':t2_enc,'team2_enc':t1_enc,'venue_enc':v_enc,
-        't1_won_toss':t1_won_rev,'toss_bat_first':toss_bat,'toss_winner_bats':twb_rev,
-        't1_form':t2_form,'t2_form':t1_form,'form_diff':round(t2_form-t1_form,4),
-        'venue_toss_rate':round(vtr,4),'venue_matches':vmc,
-        'h2h_t1_winrate':h2h_rev,'season_norm':round(sn,4)
-    }
-    df_rev=pd.DataFrame([row_rev])[FEATURES]
-    prob_rev=model.predict_proba(df_rev)[0]
-    p_t1_rev=prob_rev[0]   # P(team1 wins) when team1 is in slot2 = P(slot2 wins) = prob[0]
-
-    # ── Average both estimates ────────────────────────────────────────────
-    p_t1=( p_t1_fwd + p_t1_rev ) / 2.0
-    p_t2=1.0 - p_t1
-
-    # SHAP contribs from forward pass (directionally correct for display)
-    dmat=xgb.DMatrix(df_fwd)
+    row={'team1_enc':t1_enc,'team2_enc':t2_enc,'venue_enc':v_enc,'t1_won_toss':t1_won,'toss_bat_first':toss_bat,'toss_winner_bats':twb,'t1_form':t1_form,'t2_form':t2_form,'form_diff':round(t1_form-t2_form,4),'venue_toss_rate':round(vtr,4),'venue_matches':vmc,'h2h_t1_winrate':h2h,'season_norm':round(sn,4)}
+    df_in=pd.DataFrame([row])[FEATURES]
+    import xgboost as xgb
+    dmat=xgb.DMatrix(df_in)
+    prob=model.predict_proba(df_in)[0]
     contribs=model.get_booster().predict(dmat,pred_contribs=True)[0]
-    return p_t1, p_t2, dict(zip(FEATURES,contribs[:-1]))
+    return prob[1],prob[0],dict(zip(FEATURES,contribs[:-1]))
 
 def shap_chart(contribs,team1,team2):
     sc=sorted(contribs.items(),key=lambda x:abs(x[1]),reverse=True)[:8]
@@ -341,7 +295,44 @@ with col_form2:
 
 st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
 
-# ── PLAYING XII ────────────────────────────────────────────────────────────────
+# ── WEATHER + CONDITIONS ───────────────────────────────────────────────────────
+st.markdown("### 🌤️ Match Conditions")
+st.caption("Enter conditions before the match — affects dew analysis and post-prediction context")
+
+wc1, wc2, wc3, wc4 = st.columns(4)
+
+with wc1:
+    match_time = st.radio(
+        "⏰ Match Time",
+        ["🌅 Afternoon (2 PM)", "🌙 Evening (7:30 PM)"],
+        index=1, key="match_time", horizontal=False
+    )
+    is_evening = "Evening" in match_time
+
+with wc2:
+    weather = st.radio(
+        "🌤️ Weather",
+        ["☀️ Clear", "⛅ Partly Cloudy", "☁️ Overcast", "🌧️ Rain Risk"],
+        index=0, key="weather_cond", horizontal=False
+    )
+
+with wc3:
+    dew = st.radio(
+        "💧 Dew Factor",
+        ["🟢 None", "🟡 Moderate", "🔴 Heavy"],
+        index=0, key="dew_factor", horizontal=False
+    )
+    dew_val = 0 if "None" in dew else 1 if "Moderate" in dew else 2
+
+with wc4:
+    temp = st.slider("🌡️ Temperature (°C)", 15, 45, 28, key="temperature")
+    humidity = st.radio(
+        "💦 Humidity",
+        ["Low", "Medium", "High"],
+        index=1, key="humidity", horizontal=True
+    )
+
+
 st.markdown("### 🏏 Playing XII")
 st.caption("Select 11 + Impact Player · Expand stats panel to see live T20 career stats from Cricinfo")
 
@@ -402,7 +393,18 @@ if st.button(f"🔮 {phase} PREDICT",disabled=not ready,use_container_width=True
         try:
             t1p,t2p,shap_c=ml_predict(team1,team2,venue,t1_form_val,t2_form_val,h2h_rate,t1_won,toss_bat)
             toss_info=f"{tw} won · chose to {td}" if is_post else "Pre-toss"
-            st.session_state.pred={"t1p":t1p,"t2p":t2p,"shap":shap_c,"team1":team1,"team2":team2,"phase":phase,"toss_info":toss_info,"xi1":list(st.session_state.xi1),"xi2":list(st.session_state.xi2),"imp1":st.session_state.imp1,"imp2":st.session_state.imp2}
+            st.session_state.pred={
+                "t1p":t1p,"t2p":t2p,"shap":shap_c,
+                "team1":team1,"team2":team2,"phase":phase,"toss_info":toss_info,
+                "xi1":list(st.session_state.xi1),"xi2":list(st.session_state.xi2),
+                "imp1":st.session_state.imp1,"imp2":st.session_state.imp2,
+                "is_evening":is_evening,"weather":weather,"dew_val":dew_val,
+                "dew":dew,"temp":temp,"humidity":humidity,
+                "batting_first": team1 if (
+                    (is_post and t1_won==1 and toss_bat==1) or
+                    (is_post and t1_won==0 and toss_bat==0)
+                ) else (team2 if is_post else "Unknown"),
+            }
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -428,6 +430,106 @@ if st.session_state.pred:
     with right:
         st.markdown("#### 🧠 Why?")
         shap_cards(p["shap"],rt1,rt2,c1c,c2c)
+
+    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+
+    # ── WEATHER IMPACT ANALYSIS ────────────────────────────────────────────────
+    st.markdown("#### 🌤️ Weather & Conditions Impact")
+    pw = p  # alias for readability
+
+    # Determine batting team
+    batting_first = pw.get("batting_first","Unknown")
+    chasing_team  = pw["team2"] if batting_first==pw["team1"] else pw["team1"] if batting_first==pw["team2"] else "Unknown"
+    bf_short  = TEAM_META.get(batting_first,{}).get("short",batting_first)
+    ch_short  = TEAM_META.get(chasing_team,{}).get("short",chasing_team)
+    bf_color  = TEAM_META.get(batting_first,{}).get("color","#fff")
+    ch_color  = TEAM_META.get(chasing_team,{}).get("color","#fff")
+
+    # Compute weather impact signals
+    signals  = []
+    warnings = []
+
+    # DEW factor
+    if pw["dew_val"] == 2:
+        signals.append(("🔴 Heavy Dew Expected", f"Significant advantage for <b style='color:{ch_color}'>{ch_short}</b> (chasing). Ball becomes wet and difficult to grip for bowlers. Spinners especially affected. Chasing team scores easier in 2nd innings.", "high"))
+        warnings.append("heavy_dew")
+    elif pw["dew_val"] == 1:
+        signals.append(("🟡 Moderate Dew", f"Mild advantage for <b style='color:{ch_color}'>{ch_short}</b> (chasing) in later overs. Monitor dew situation at ground.", "medium"))
+
+    # Evening match
+    if pw["is_evening"]:
+        if pw["dew_val"] > 0:
+            signals.append(("🌙 Evening + Dew Combination", "Evening matches with dew are the strongest chasing advantage in T20 cricket. Dew makes the ball skid onto the bat in the 2nd innings.", "high"))
+    else:
+        signals.append(("🌅 Afternoon Match", "Day match — no dew expected. Pitch behaviour more neutral. Pacers may get more assistance in the first hour.", "neutral"))
+
+    # Weather conditions
+    if "Rain" in pw["weather"]:
+        signals.append(("🌧️ Rain Risk", "Match may be interrupted. DLS calculation could come into play — this fundamentally changes target and strategy. Higher uncertainty in prediction.", "high"))
+    elif "Overcast" in pw["weather"]:
+        signals.append(("☁️ Overcast Conditions", "Cloud cover aids swing bowling, especially in early overs. Pace bowlers with the new ball get more assistance. Toss to field might be more valuable.", "medium"))
+    elif "Partly" in pw["weather"]:
+        signals.append(("⛅ Partly Cloudy", "Mixed conditions — some swing early, likely to clear up. Moderate impact on play.", "low"))
+    else:
+        signals.append(("☀️ Clear Conditions", "No weather disruption expected. Pitch and ground conditions are the primary factors today.", "neutral"))
+
+    # Temperature
+    if pw["temp"] >= 38:
+        signals.append(("🌡️ Very High Temperature", f"{pw['temp']}°C — Extreme heat affects outfield pace (ball races to boundary), player fitness in death overs, and swing (hot air reduces swing). High-scoring match likely.", "medium"))
+    elif pw["temp"] <= 20:
+        signals.append(("🌡️ Cool Conditions", f"{pw['temp']}°C — Cooler weather assists swing and seam movement significantly. Lower-scoring match possible. Pacers benefit.", "medium"))
+
+    # Humidity
+    if pw["humidity"] == "High" and pw["is_evening"]:
+        signals.append(("💦 High Humidity + Evening", "Combination increases dew probability and aids swing. Ball may do more than expected for pacers throughout the match.", "medium"))
+
+    # Render signals
+    wc_cols = st.columns(2)
+    for i, (title, detail, level) in enumerate(signals):
+        color = "#F87171" if level=="high" else "#FACC15" if level=="medium" else "#60A5FA" if level=="low" else "#4ADE80"
+        bg    = "rgba(248,113,113,0.06)" if level=="high" else "rgba(250,204,21,0.06)" if level=="medium" else "rgba(96,165,250,0.06)" if level=="low" else "rgba(74,222,128,0.06)"
+        with wc_cols[i % 2]:
+            st.markdown(
+                f'<div class="reason-card" style="border-color:{color}33;background:{bg}">'
+                f'<div style="font-size:12px;font-weight:700;color:{color};margin-bottom:4px">{title}</div>'
+                f'<div style="font-size:11px;color:#94A3B8;line-height:1.5">{detail}</div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+
+    # Overall weather verdict
+    if "heavy_dew" in warnings and pw["is_evening"]:
+        dew_verdict = f"⚠️ Heavy dew + evening match = strong chasing advantage. If <b style='color:{bf_color}'>{bf_short}</b> bats first, they need to post 175+ to negate dew effect at most venues."
+        vbg = "rgba(248,113,113,0.08)"; vbc = "#F87171"
+    elif pw["dew_val"] == 1 and pw["is_evening"]:
+        dew_verdict = f"Moderate dew expected. Slight advantage to <b style='color:{ch_color}'>{ch_short}</b> if chasing. Effect depends on ground and how quickly dew sets in."
+        vbg = "rgba(250,204,21,0.08)"; vbc = "#FACC15"
+    elif "Rain" in pw["weather"]:
+        dew_verdict = "Rain risk adds high uncertainty. DLS may apply — consider this while betting or picking Fantasy teams."
+        vbg = "rgba(248,113,113,0.08)"; vbc = "#F87171"
+    else:
+        dew_verdict = f"Conditions are relatively neutral today. Weather is not a significant swing factor in this prediction. Trust the model's team + form analysis."
+        vbg = "rgba(74,222,128,0.08)"; vbc = "#4ADE80"
+
+    st.markdown(
+        f'<div style="background:{vbg};border:1px solid {vbc}44;border-left:3px solid {vbc};border-radius:10px;padding:12px 16px;margin-top:8px">'
+        f'<div style="font-size:11px;font-weight:700;color:{vbc};margin-bottom:4px">🎯 CONDITIONS VERDICT</div>'
+        f'<div style="font-size:12px;color:#CBD5E1;line-height:1.6">{dew_verdict}</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
+    # Conditions summary row
+    st.markdown(
+        f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">'
+        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">{"🌙 Evening" if pw["is_evening"] else "🌅 Afternoon"}</span>'
+        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">{pw["weather"]}</span>'
+        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">💧 {pw["dew"]}</span>'
+        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">🌡️ {pw["temp"]}°C</span>'
+        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">💦 {pw["humidity"]} Humidity</span>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
     b1,b2=st.columns(2)
