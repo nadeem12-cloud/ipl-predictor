@@ -8,6 +8,10 @@ from cricinfo_data import (
     fetch_points_table, fetch_match_results, fetch_season_stats,
     fetch_player_id, fetch_player_stats, compute_team_form, compute_h2h,
 )
+from trade_data import (
+    analyze_team_needs, compute_trade_compatibility, role_display,
+    fetch_trade_rumors, clean_rss_link,
+)
 
 st.set_page_config(page_title="IPL Predictor 2026", page_icon="🏏",
                    layout="wide", initial_sidebar_state="expanded")
@@ -228,321 +232,473 @@ with st.sidebar:
 #  MAIN APP
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown('<div style="font-family:Playfair Display,serif;font-size:32px;font-weight:900;color:#D4AF37;letter-spacing:0.04em">🏏 IPL PREDICTOR 2026</div>',unsafe_allow_html=True)
-st.markdown('<div style="color:#475569;font-size:11px;letter-spacing:0.2em;margin-bottom:8px">XGBOOST + SHAP · LIVE CRICINFO DATA · PLAYING XII</div>',unsafe_allow_html=True)
+st.markdown('<div style="color:#475569;font-size:11px;letter-spacing:0.2em;margin-bottom:8px">XGBOOST + SHAP · LIVE CRICINFO DATA · TRADE PREDICTOR</div>',unsafe_allow_html=True)
 st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
 
-if load_error:
-    st.error(f"⚠️ Model not found in `models/`. {load_error}"); st.stop()
+tab_match, tab_trade = st.tabs(["🔮 Match Predictor", "🔄 Trade Predictor"])
 
-# ── MATCH SETUP ────────────────────────────────────────────────────────────────
-st.markdown("### ⚙️ Match Setup")
-c1,c2,c3=st.columns([2,1,2])
-with c1: team1=st.selectbox("🔵 Team 1",TEAMS,index=0,key="sel_t1")
-with c2: st.markdown("<div style='padding-top:28px;text-align:center;color:#475569;font-weight:800;font-size:18px'>VS</div>",unsafe_allow_html=True)
-with c3: team2=st.selectbox("🔴 Team 2",[t for t in TEAMS if t!=team1],index=3,key="sel_t2")
-venue=st.selectbox("📍 Venue",IPL_VENUES,key="sel_venue")
+with tab_match:
+    if load_error:
+        st.error(f"⚠️ Model not found in `models/`. {load_error}"); st.stop()
 
-phase=st.radio("Phase",["PRE-TOSS","POST-TOSS"],horizontal=True,key="phase_radio",label_visibility="collapsed")
-is_post=phase=="POST-TOSS"
-bc="#3B82F6" if not is_post else "#D4AF37"
-st.markdown(f'<span style="background:{bc}22;border:1px solid {bc}55;color:{bc};padding:3px 12px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.15em">{phase} MODE</span>',unsafe_allow_html=True)
+    # ── MATCH SETUP ────────────────────────────────────────────────────────────────
+    st.markdown("### ⚙️ Match Setup")
+    c1,c2,c3=st.columns([2,1,2])
+    with c1: team1=st.selectbox("🔵 Team 1",TEAMS,index=0,key="sel_t1")
+    with c2: st.markdown("<div style='padding-top:28px;text-align:center;color:#475569;font-weight:800;font-size:18px'>VS</div>",unsafe_allow_html=True)
+    with c3: team2=st.selectbox("🔴 Team 2",[t for t in TEAMS if t!=team1],index=3,key="sel_t2")
+    venue=st.selectbox("📍 Venue",IPL_VENUES,key="sel_venue")
 
-t1_won=0; toss_bat=1
-if is_post:
-    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-    tc1,tc2=st.columns(2)
-    with tc1:
-        tw=st.radio("🎯 Toss Winner",[team1,team2],horizontal=True,key="tw_r"); t1_won=int(tw==team1)
-    with tc2:
-        td=st.radio("Decision",["bat","field"],horizontal=True,key="td_r"); toss_bat=int(td=="bat")
+    phase=st.radio("Phase",["PRE-TOSS","POST-TOSS"],horizontal=True,key="phase_radio",label_visibility="collapsed")
+    is_post=phase=="POST-TOSS"
+    bc="#3B82F6" if not is_post else "#D4AF37"
+    st.markdown(f'<span style="background:{bc}22;border:1px solid {bc}55;color:{bc};padding:3px 12px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.15em">{phase} MODE</span>',unsafe_allow_html=True)
 
-st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-
-# ── FORM + H2H — live from Cricinfo ───────────────────────────────────────────
-t1_form_val, t1_wl = compute_team_form(results, team1)
-t2_form_val, t2_wl = compute_team_form(results, team2)
-h2h_meetings, h2h_rate = compute_h2h(results, team1, team2)
-
-col_form1,col_h2h,col_form2=st.columns([5,4,5])
-with col_form1:
-    c1c=TEAM_META[team1]["color"]
-    t1pt=pt_lookup.get(team1,{})
-    st.markdown(f'<div style="font-size:12px;font-weight:700;color:{c1c};margin-bottom:6px">{TEAM_META[team1]["short"]} — {t1pt.get("won",0)}W {t1pt.get("lost",0)}L · {t1pt.get("pts",0)} pts</div>',unsafe_allow_html=True)
-    chips="".join([wl_chip(r) for r in t1_wl]) or '<span style="color:#475569;font-size:11px">No matches yet</span>'
-    st.markdown(f'<div>Last 5: {chips}</div>',unsafe_allow_html=True)
-    st.markdown(f'<div style="font-size:11px;color:#64748B;margin-top:4px">Form: <b style="color:{c1c}">{t1_form_val*100:.0f}%</b> · NRR: <b style="color:{c1c}">{t1pt.get("nrr",0):+.2f}</b></div>',unsafe_allow_html=True)
-
-with col_h2h:
-    st.markdown('<div style="text-align:center;font-size:11px;font-weight:700;color:#D4AF37;margin-bottom:8px">🤝 HEAD TO HEAD</div>',unsafe_allow_html=True)
-    if h2h_meetings:
-        t1_wins=sum(1 for w,_,_,_ in h2h_meetings if w==team1)
-        t2_wins=len(h2h_meetings)-t1_wins
-        st.markdown(f'<div style="display:flex;justify-content:center;align-items:center;gap:16px"><span style="font-size:24px;font-weight:900;color:{TEAM_META[team1]["color"]}">{t1_wins}</span><span style="color:#475569;font-size:11px">last {len(h2h_meetings)}</span><span style="font-size:24px;font-weight:900;color:{TEAM_META[team2]["color"]}">{t2_wins}</span></div>',unsafe_allow_html=True)
-        for w,date,margin,mvenue in reversed(h2h_meetings[-3:]):
-            wc=TEAM_META[team1]["color"] if w==team1 else TEAM_META[team2]["color"]
-            ws=TEAM_META.get(w,{}).get("short",w)
-            st.markdown(f'<div style="font-size:10px;color:#475569;text-align:center">{date} · <span style="color:{wc};font-weight:700">{ws}</span> won</div>',unsafe_allow_html=True)
-    else:
-        st.markdown('<div style="text-align:center;color:#475569;font-size:11px">No meetings in current data</div>',unsafe_allow_html=True)
-
-with col_form2:
-    c2c=TEAM_META[team2]["color"]
-    t2pt=pt_lookup.get(team2,{})
-    st.markdown(f'<div style="font-size:12px;font-weight:700;color:{c2c};margin-bottom:6px">{TEAM_META[team2]["short"]} — {t2pt.get("won",0)}W {t2pt.get("lost",0)}L · {t2pt.get("pts",0)} pts</div>',unsafe_allow_html=True)
-    chips2="".join([wl_chip(r) for r in t2_wl]) or '<span style="color:#475569;font-size:11px">No matches yet</span>'
-    st.markdown(f'<div>Last 5: {chips2}</div>',unsafe_allow_html=True)
-    st.markdown(f'<div style="font-size:11px;color:#64748B;margin-top:4px">Form: <b style="color:{c2c}">{t2_form_val*100:.0f}%</b> · NRR: <b style="color:{c2c}">{t2pt.get("nrr",0):+.2f}</b></div>',unsafe_allow_html=True)
-
-st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-
-# ── WEATHER + CONDITIONS ───────────────────────────────────────────────────────
-st.markdown("### 🌤️ Match Conditions")
-st.caption("Enter conditions before the match — affects dew analysis and post-prediction context")
-
-wc1, wc2, wc3, wc4 = st.columns(4)
-
-with wc1:
-    match_time = st.radio(
-        "⏰ Match Time",
-        ["🌅 Afternoon (2 PM)", "🌙 Evening (7:30 PM)"],
-        index=1, key="match_time", horizontal=False
-    )
-    is_evening = "Evening" in match_time
-
-with wc2:
-    weather = st.radio(
-        "🌤️ Weather",
-        ["☀️ Clear", "⛅ Partly Cloudy", "☁️ Overcast", "🌧️ Rain Risk"],
-        index=0, key="weather_cond", horizontal=False
-    )
-
-with wc3:
-    dew = st.radio(
-        "💧 Dew Factor",
-        ["🟢 None", "🟡 Moderate", "🔴 Heavy"],
-        index=0, key="dew_factor", horizontal=False
-    )
-    dew_val = 0 if "None" in dew else 1 if "Moderate" in dew else 2
-
-with wc4:
-    temp = st.slider("🌡️ Temperature (°C)", 15, 45, 28, key="temperature")
-    humidity = st.radio(
-        "💦 Humidity",
-        ["Low", "Medium", "High"],
-        index=1, key="humidity", horizontal=True
-    )
-
-
-st.markdown("### 🏏 Playing XII")
-st.caption("Select 11 + Impact Player · Expand stats panel to see live T20 career stats from Cricinfo")
-
-def squad_selector(team_name,xi_key,imp_key,pid_cache):
-    squad=TEAM_SQUADS[team_name]; color=TEAM_META[team_name]["color"]; short=TEAM_META[team_name]["short"]
-    xi=st.session_state[xi_key]; imp=st.session_state[imp_key]; done=len(xi)==11 and bool(imp)
-    badge_bdr="#4ADE80" if done else color
-    st.markdown(f'<div style="background:rgba(255,255,255,0.02);border:1px solid {badge_bdr}44;border-radius:10px;padding:10px 14px;margin-bottom:10px"><span style="color:{color};font-weight:800;font-size:14px">{short}</span><span style="color:#64748B;font-size:11px;margin-left:8px">{team_name}</span><span style="float:right;font-size:11px;color:{"#4ADE80" if done else "#D4AF37"};font-weight:700">{"✅ Ready" if done else f"XI:{len(xi)}/11"}</span></div>',unsafe_allow_html=True)
-
-    st.markdown('<div style="font-size:11px;color:#D4AF37;font-weight:700;margin-bottom:4px">📋 PLAYING XI</div>',unsafe_allow_html=True)
-    selected=st.multiselect("XI",squad,default=xi,max_selections=11,key=f"ms_{xi_key}",label_visibility="collapsed",format_func=lambda p:f"{p}  [{get_role(p)}]")
-    st.session_state[xi_key]=selected
-
-    non_xi=[p for p in squad if p not in selected]
-    st.markdown('<div style="font-size:11px;color:#F59E0B;font-weight:700;margin:8px 0 4px">⚡ IMPACT PLAYER</div>',unsafe_allow_html=True)
-    if non_xi:
-        imp_opts=["— None —"]+non_xi
-        cur_idx=imp_opts.index(imp) if imp in imp_opts else 0
-        chosen=st.selectbox("Impact",imp_opts,index=cur_idx,key=f"imp_{xi_key}",label_visibility="collapsed",format_func=lambda p:f"⚡ {p}  [{get_role(p)}]" if p!="— None —" else "— None —")
-        st.session_state[imp_key]="" if chosen=="— None —" else chosen
-    else:
-        st.caption("Select XI first")
-
-    cur_xi=st.session_state[xi_key]; cur_imp=st.session_state[imp_key]
-    if cur_xi:
-        sm=xi_summary(cur_xi)
-        m1,m2,m3,m4=st.columns(4)
-        m1.metric("🏏",sm["BAT"]); m2.metric("🎯",sm["BOWL"]); m3.metric("⚡",sm["ALL"]); m4.metric("🧤",sm["WK"])
-        with st.expander(f"📈 Player Stats — {short} (live from Cricinfo)", expanded=False):
-            st.caption("T20 career stats · Fetching on demand · May take a moment")
-            all12=cur_xi+([cur_imp] if cur_imp else [])
-            for p in all12:
-                if p not in pid_cache:
-                    pid_cache[p]=fetch_player_id(p)
-                render_player_card(p, pid_cache)
-
-col_t1,col_sep,col_t2=st.columns([10,1,10])
-if "pid_cache" not in st.session_state: st.session_state.pid_cache={}
-with col_t1: squad_selector(team1,"xi1","imp1",st.session_state.pid_cache)
-with col_sep: st.markdown("<div style='border-left:1px solid rgba(255,255,255,0.06);height:100%;margin:0 auto;width:1px'></div>",unsafe_allow_html=True)
-with col_t2: squad_selector(team2,"xi2","imp2",st.session_state.pid_cache)
-
-st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-
-# ── PREDICT ────────────────────────────────────────────────────────────────────
-xi1_ok=len(st.session_state.xi1)==11; xi2_ok=len(st.session_state.xi2)==11
-imp1_ok=bool(st.session_state.imp1); imp2_ok=bool(st.session_state.imp2)
-ready=xi1_ok and xi2_ok and imp1_ok and imp2_ok
-
-if not xi1_ok or not xi2_ok:
-    st.warning(f"Select 11 — {TEAM_META[team1]['short']}: {len(st.session_state.xi1)}/11 · {TEAM_META[team2]['short']}: {len(st.session_state.xi2)}/11")
-elif not imp1_ok or not imp2_ok:
-    missing=[TEAM_META[t]['short'] for t,ok in [(team1,imp1_ok),(team2,imp2_ok)] if not ok]
-    st.warning(f"⚡ Set Impact Player for: {', '.join(missing)}")
-
-if st.button(f"🔮 {phase} PREDICT",disabled=not ready,use_container_width=True,type="primary",key="pred_btn"):
-    with st.spinner("Running XGBoost + SHAP..."):
-        try:
-            t1p,t2p,shap_c=ml_predict(team1,team2,venue,t1_form_val,t2_form_val,h2h_rate,t1_won,toss_bat)
-            toss_info=f"{tw} won · chose to {td}" if is_post else "Pre-toss"
-            st.session_state.pred={
-                "t1p":t1p,"t2p":t2p,"shap":shap_c,
-                "team1":team1,"team2":team2,"phase":phase,"toss_info":toss_info,
-                "xi1":list(st.session_state.xi1),"xi2":list(st.session_state.xi2),
-                "imp1":st.session_state.imp1,"imp2":st.session_state.imp2,
-                "is_evening":is_evening,"weather":weather,"dew_val":dew_val,
-                "dew":dew,"temp":temp,"humidity":humidity,
-                "batting_first": team1 if (
-                    (is_post and t1_won==1 and toss_bat==1) or
-                    (is_post and t1_won==0 and toss_bat==0)
-                ) else (team2 if is_post else "Unknown"),
-            }
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-# ── RESULTS ────────────────────────────────────────────────────────────────────
-if st.session_state.pred:
-    p=st.session_state.pred; rt1=p["team1"]; rt2=p["team2"]
-    t1p=p["t1p"]; t2p=p["t2p"]; winner=rt1 if t1p>t2p else rt2
-    conf=max(t1p,t2p); cl="HIGH" if conf>0.65 else "MEDIUM" if conf>0.55 else "LOW"
-    cc="#4ADE80" if cl=="HIGH" else "#FACC15" if cl=="MEDIUM" else "#F87171"
-    c1c=TEAM_META[rt1]["color"]; c2c=TEAM_META[rt2]["color"]
-
-    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-    st.markdown("## 🔮 Prediction")
-    st.markdown(f'<div class="winner-banner"><div style="font-size:11px;letter-spacing:0.2em;color:#D4AF37;margin-bottom:8px;font-weight:700">{p["phase"]} · XGBOOST + SHAP</div><div style="font-family:Playfair Display,serif;font-size:34px;font-weight:900;color:white;margin-bottom:16px">🏆 {winner}</div><span style="background:{cc}22;border:1px solid {cc}66;color:{cc};padding:5px 18px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.1em">{cl} CONFIDENCE &nbsp;·&nbsp; {conf*100:.1f}%</span></div>',unsafe_allow_html=True)
-    st.markdown("<br>",unsafe_allow_html=True)
-    prob_bar(t1p,t2p,rt1,rt2,c1c,c2c)
-    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-
-    left,right=st.columns(2)
-    with left:
-        st.markdown("#### 📊 SHAP — Feature Impact")
-        st.pyplot(shap_chart(p["shap"],rt1,rt2),use_container_width=True)
-    with right:
-        st.markdown("#### 🧠 Why?")
-        shap_cards(p["shap"],rt1,rt2,c1c,c2c)
+    t1_won=0; toss_bat=1
+    if is_post:
+        st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+        tc1,tc2=st.columns(2)
+        with tc1:
+            tw=st.radio("🎯 Toss Winner",[team1,team2],horizontal=True,key="tw_r"); t1_won=int(tw==team1)
+        with tc2:
+            td=st.radio("Decision",["bat","field"],horizontal=True,key="td_r"); toss_bat=int(td=="bat")
 
     st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
 
-    # ── WEATHER IMPACT ANALYSIS ────────────────────────────────────────────────
-    st.markdown("#### 🌤️ Weather & Conditions Impact")
-    pw = p  # alias for readability
+    # ── FORM + H2H — live from Cricinfo ───────────────────────────────────────────
+    t1_form_val, t1_wl = compute_team_form(results, team1)
+    t2_form_val, t2_wl = compute_team_form(results, team2)
+    h2h_meetings, h2h_rate = compute_h2h(results, team1, team2)
 
-    # Determine batting team
-    batting_first = pw.get("batting_first","Unknown")
-    chasing_team  = pw["team2"] if batting_first==pw["team1"] else pw["team1"] if batting_first==pw["team2"] else "Unknown"
-    bf_short  = TEAM_META.get(batting_first,{}).get("short",batting_first)
-    ch_short  = TEAM_META.get(chasing_team,{}).get("short",chasing_team)
-    bf_color  = TEAM_META.get(batting_first,{}).get("color","#fff")
-    ch_color  = TEAM_META.get(chasing_team,{}).get("color","#fff")
+    col_form1,col_h2h,col_form2=st.columns([5,4,5])
+    with col_form1:
+        c1c=TEAM_META[team1]["color"]
+        t1pt=pt_lookup.get(team1,{})
+        st.markdown(f'<div style="font-size:12px;font-weight:700;color:{c1c};margin-bottom:6px">{TEAM_META[team1]["short"]} — {t1pt.get("won",0)}W {t1pt.get("lost",0)}L · {t1pt.get("pts",0)} pts</div>',unsafe_allow_html=True)
+        chips="".join([wl_chip(r) for r in t1_wl]) or '<span style="color:#475569;font-size:11px">No matches yet</span>'
+        st.markdown(f'<div>Last 5: {chips}</div>',unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:11px;color:#64748B;margin-top:4px">Form: <b style="color:{c1c}">{t1_form_val*100:.0f}%</b> · NRR: <b style="color:{c1c}">{t1pt.get("nrr",0):+.2f}</b></div>',unsafe_allow_html=True)
 
-    # Compute weather impact signals
-    signals  = []
-    warnings = []
+    with col_h2h:
+        st.markdown('<div style="text-align:center;font-size:11px;font-weight:700;color:#D4AF37;margin-bottom:8px">🤝 HEAD TO HEAD</div>',unsafe_allow_html=True)
+        if h2h_meetings:
+            t1_wins=sum(1 for w,_,_,_ in h2h_meetings if w==team1)
+            t2_wins=len(h2h_meetings)-t1_wins
+            st.markdown(f'<div style="display:flex;justify-content:center;align-items:center;gap:16px"><span style="font-size:24px;font-weight:900;color:{TEAM_META[team1]["color"]}">{t1_wins}</span><span style="color:#475569;font-size:11px">last {len(h2h_meetings)}</span><span style="font-size:24px;font-weight:900;color:{TEAM_META[team2]["color"]}">{t2_wins}</span></div>',unsafe_allow_html=True)
+            for w,date,margin,mvenue in reversed(h2h_meetings[-3:]):
+                wc=TEAM_META[team1]["color"] if w==team1 else TEAM_META[team2]["color"]
+                ws=TEAM_META.get(w,{}).get("short",w)
+                st.markdown(f'<div style="font-size:10px;color:#475569;text-align:center">{date} · <span style="color:{wc};font-weight:700">{ws}</span> won</div>',unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="text-align:center;color:#475569;font-size:11px">No meetings in current data</div>',unsafe_allow_html=True)
 
-    # DEW factor
-    if pw["dew_val"] == 2:
-        signals.append(("🔴 Heavy Dew Expected", f"Significant advantage for <b style='color:{ch_color}'>{ch_short}</b> (chasing). Ball becomes wet and difficult to grip for bowlers. Spinners especially affected. Chasing team scores easier in 2nd innings.", "high"))
-        warnings.append("heavy_dew")
-    elif pw["dew_val"] == 1:
-        signals.append(("🟡 Moderate Dew", f"Mild advantage for <b style='color:{ch_color}'>{ch_short}</b> (chasing) in later overs. Monitor dew situation at ground.", "medium"))
+    with col_form2:
+        c2c=TEAM_META[team2]["color"]
+        t2pt=pt_lookup.get(team2,{})
+        st.markdown(f'<div style="font-size:12px;font-weight:700;color:{c2c};margin-bottom:6px">{TEAM_META[team2]["short"]} — {t2pt.get("won",0)}W {t2pt.get("lost",0)}L · {t2pt.get("pts",0)} pts</div>',unsafe_allow_html=True)
+        chips2="".join([wl_chip(r) for r in t2_wl]) or '<span style="color:#475569;font-size:11px">No matches yet</span>'
+        st.markdown(f'<div>Last 5: {chips2}</div>',unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:11px;color:#64748B;margin-top:4px">Form: <b style="color:{c2c}">{t2_form_val*100:.0f}%</b> · NRR: <b style="color:{c2c}">{t2pt.get("nrr",0):+.2f}</b></div>',unsafe_allow_html=True)
 
-    # Evening match
-    if pw["is_evening"]:
-        if pw["dew_val"] > 0:
-            signals.append(("🌙 Evening + Dew Combination", "Evening matches with dew are the strongest chasing advantage in T20 cricket. Dew makes the ball skid onto the bat in the 2nd innings.", "high"))
-    else:
-        signals.append(("🌅 Afternoon Match", "Day match — no dew expected. Pitch behaviour more neutral. Pacers may get more assistance in the first hour.", "neutral"))
+    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
 
-    # Weather conditions
-    if "Rain" in pw["weather"]:
-        signals.append(("🌧️ Rain Risk", "Match may be interrupted. DLS calculation could come into play — this fundamentally changes target and strategy. Higher uncertainty in prediction.", "high"))
-    elif "Overcast" in pw["weather"]:
-        signals.append(("☁️ Overcast Conditions", "Cloud cover aids swing bowling, especially in early overs. Pace bowlers with the new ball get more assistance. Toss to field might be more valuable.", "medium"))
-    elif "Partly" in pw["weather"]:
-        signals.append(("⛅ Partly Cloudy", "Mixed conditions — some swing early, likely to clear up. Moderate impact on play.", "low"))
-    else:
-        signals.append(("☀️ Clear Conditions", "No weather disruption expected. Pitch and ground conditions are the primary factors today.", "neutral"))
+    # ── WEATHER + CONDITIONS ───────────────────────────────────────────────────────
+    st.markdown("### 🌤️ Match Conditions")
+    st.caption("Enter conditions before the match — affects dew analysis and post-prediction context")
 
-    # Temperature
-    if pw["temp"] >= 38:
-        signals.append(("🌡️ Very High Temperature", f"{pw['temp']}°C — Extreme heat affects outfield pace (ball races to boundary), player fitness in death overs, and swing (hot air reduces swing). High-scoring match likely.", "medium"))
-    elif pw["temp"] <= 20:
-        signals.append(("🌡️ Cool Conditions", f"{pw['temp']}°C — Cooler weather assists swing and seam movement significantly. Lower-scoring match possible. Pacers benefit.", "medium"))
+    wc1, wc2, wc3, wc4 = st.columns(4)
 
-    # Humidity
-    if pw["humidity"] == "High" and pw["is_evening"]:
-        signals.append(("💦 High Humidity + Evening", "Combination increases dew probability and aids swing. Ball may do more than expected for pacers throughout the match.", "medium"))
+    with wc1:
+        match_time = st.radio(
+            "⏰ Match Time",
+            ["🌅 Afternoon (2 PM)", "🌙 Evening (7:30 PM)"],
+            index=1, key="match_time", horizontal=False
+        )
+        is_evening = "Evening" in match_time
 
-    # Render signals
-    wc_cols = st.columns(2)
-    for i, (title, detail, level) in enumerate(signals):
-        color = "#F87171" if level=="high" else "#FACC15" if level=="medium" else "#60A5FA" if level=="low" else "#4ADE80"
-        bg    = "rgba(248,113,113,0.06)" if level=="high" else "rgba(250,204,21,0.06)" if level=="medium" else "rgba(96,165,250,0.06)" if level=="low" else "rgba(74,222,128,0.06)"
-        with wc_cols[i % 2]:
+    with wc2:
+        weather = st.radio(
+            "🌤️ Weather",
+            ["☀️ Clear", "⛅ Partly Cloudy", "☁️ Overcast", "🌧️ Rain Risk"],
+            index=0, key="weather_cond", horizontal=False
+        )
+
+    with wc3:
+        dew = st.radio(
+            "💧 Dew Factor",
+            ["🟢 None", "🟡 Moderate", "🔴 Heavy"],
+            index=0, key="dew_factor", horizontal=False
+        )
+        dew_val = 0 if "None" in dew else 1 if "Moderate" in dew else 2
+
+    with wc4:
+        temp = st.slider("🌡️ Temperature (°C)", 15, 45, 28, key="temperature")
+        humidity = st.radio(
+            "💦 Humidity",
+            ["Low", "Medium", "High"],
+            index=1, key="humidity", horizontal=True
+        )
+
+
+    st.markdown("### 🏏 Playing XII")
+    st.caption("Select 11 + Impact Player · Expand stats panel to see live T20 career stats from Cricinfo")
+
+    def squad_selector(team_name,xi_key,imp_key,pid_cache):
+        squad=TEAM_SQUADS[team_name]; color=TEAM_META[team_name]["color"]; short=TEAM_META[team_name]["short"]
+        xi=st.session_state[xi_key]; imp=st.session_state[imp_key]; done=len(xi)==11 and bool(imp)
+        badge_bdr="#4ADE80" if done else color
+        st.markdown(f'<div style="background:rgba(255,255,255,0.02);border:1px solid {badge_bdr}44;border-radius:10px;padding:10px 14px;margin-bottom:10px"><span style="color:{color};font-weight:800;font-size:14px">{short}</span><span style="color:#64748B;font-size:11px;margin-left:8px">{team_name}</span><span style="float:right;font-size:11px;color:{"#4ADE80" if done else "#D4AF37"};font-weight:700">{"✅ Ready" if done else f"XI:{len(xi)}/11"}</span></div>',unsafe_allow_html=True)
+
+        st.markdown('<div style="font-size:11px;color:#D4AF37;font-weight:700;margin-bottom:4px">📋 PLAYING XI</div>',unsafe_allow_html=True)
+        selected=st.multiselect("XI",squad,default=xi,max_selections=11,key=f"ms_{xi_key}",label_visibility="collapsed",format_func=lambda p:f"{p}  [{get_role(p)}]")
+        st.session_state[xi_key]=selected
+
+        non_xi=[p for p in squad if p not in selected]
+        st.markdown('<div style="font-size:11px;color:#F59E0B;font-weight:700;margin:8px 0 4px">⚡ IMPACT PLAYER</div>',unsafe_allow_html=True)
+        if non_xi:
+            imp_opts=["— None —"]+non_xi
+            cur_idx=imp_opts.index(imp) if imp in imp_opts else 0
+            chosen=st.selectbox("Impact",imp_opts,index=cur_idx,key=f"imp_{xi_key}",label_visibility="collapsed",format_func=lambda p:f"⚡ {p}  [{get_role(p)}]" if p!="— None —" else "— None —")
+            st.session_state[imp_key]="" if chosen=="— None —" else chosen
+        else:
+            st.caption("Select XI first")
+
+        cur_xi=st.session_state[xi_key]; cur_imp=st.session_state[imp_key]
+        if cur_xi:
+            sm=xi_summary(cur_xi)
+            m1,m2,m3,m4=st.columns(4)
+            m1.metric("🏏",sm["BAT"]); m2.metric("🎯",sm["BOWL"]); m3.metric("⚡",sm["ALL"]); m4.metric("🧤",sm["WK"])
+            with st.expander(f"📈 Player Stats — {short} (live from Cricinfo)", expanded=False):
+                st.caption("T20 career stats · Fetching on demand · May take a moment")
+                all12=cur_xi+([cur_imp] if cur_imp else [])
+                for p in all12:
+                    if p not in pid_cache:
+                        pid_cache[p]=fetch_player_id(p)
+                    render_player_card(p, pid_cache)
+
+    col_t1,col_sep,col_t2=st.columns([10,1,10])
+    if "pid_cache" not in st.session_state: st.session_state.pid_cache={}
+    with col_t1: squad_selector(team1,"xi1","imp1",st.session_state.pid_cache)
+    with col_sep: st.markdown("<div style='border-left:1px solid rgba(255,255,255,0.06);height:100%;margin:0 auto;width:1px'></div>",unsafe_allow_html=True)
+    with col_t2: squad_selector(team2,"xi2","imp2",st.session_state.pid_cache)
+
+    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+
+    # ── PREDICT ────────────────────────────────────────────────────────────────────
+    xi1_ok=len(st.session_state.xi1)==11; xi2_ok=len(st.session_state.xi2)==11
+    imp1_ok=bool(st.session_state.imp1); imp2_ok=bool(st.session_state.imp2)
+    ready=xi1_ok and xi2_ok and imp1_ok and imp2_ok
+
+    if not xi1_ok or not xi2_ok:
+        st.warning(f"Select 11 — {TEAM_META[team1]['short']}: {len(st.session_state.xi1)}/11 · {TEAM_META[team2]['short']}: {len(st.session_state.xi2)}/11")
+    elif not imp1_ok or not imp2_ok:
+        missing=[TEAM_META[t]['short'] for t,ok in [(team1,imp1_ok),(team2,imp2_ok)] if not ok]
+        st.warning(f"⚡ Set Impact Player for: {', '.join(missing)}")
+
+    if st.button(f"🔮 {phase} PREDICT",disabled=not ready,use_container_width=True,type="primary",key="pred_btn"):
+        with st.spinner("Running XGBoost + SHAP..."):
+            try:
+                t1p,t2p,shap_c=ml_predict(team1,team2,venue,t1_form_val,t2_form_val,h2h_rate,t1_won,toss_bat)
+                toss_info=f"{tw} won · chose to {td}" if is_post else "Pre-toss"
+                st.session_state.pred={
+                    "t1p":t1p,"t2p":t2p,"shap":shap_c,
+                    "team1":team1,"team2":team2,"phase":phase,"toss_info":toss_info,
+                    "xi1":list(st.session_state.xi1),"xi2":list(st.session_state.xi2),
+                    "imp1":st.session_state.imp1,"imp2":st.session_state.imp2,
+                    "is_evening":is_evening,"weather":weather,"dew_val":dew_val,
+                    "dew":dew,"temp":temp,"humidity":humidity,
+                    "batting_first": team1 if (
+                        (is_post and t1_won==1 and toss_bat==1) or
+                        (is_post and t1_won==0 and toss_bat==0)
+                    ) else (team2 if is_post else "Unknown"),
+                }
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # ── RESULTS ────────────────────────────────────────────────────────────────────
+    if st.session_state.pred:
+        p=st.session_state.pred; rt1=p["team1"]; rt2=p["team2"]
+        t1p=p["t1p"]; t2p=p["t2p"]; winner=rt1 if t1p>t2p else rt2
+        conf=max(t1p,t2p); cl="HIGH" if conf>0.65 else "MEDIUM" if conf>0.55 else "LOW"
+        cc="#4ADE80" if cl=="HIGH" else "#FACC15" if cl=="MEDIUM" else "#F87171"
+        c1c=TEAM_META[rt1]["color"]; c2c=TEAM_META[rt2]["color"]
+
+        st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+        st.markdown("## 🔮 Prediction")
+        st.markdown(f'<div class="winner-banner"><div style="font-size:11px;letter-spacing:0.2em;color:#D4AF37;margin-bottom:8px;font-weight:700">{p["phase"]} · XGBOOST + SHAP</div><div style="font-family:Playfair Display,serif;font-size:34px;font-weight:900;color:white;margin-bottom:16px">🏆 {winner}</div><span style="background:{cc}22;border:1px solid {cc}66;color:{cc};padding:5px 18px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.1em">{cl} CONFIDENCE &nbsp;·&nbsp; {conf*100:.1f}%</span></div>',unsafe_allow_html=True)
+        st.markdown("<br>",unsafe_allow_html=True)
+        prob_bar(t1p,t2p,rt1,rt2,c1c,c2c)
+        st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+
+        left,right=st.columns(2)
+        with left:
+            st.markdown("#### 📊 SHAP — Feature Impact")
+            st.pyplot(shap_chart(p["shap"],rt1,rt2),use_container_width=True)
+        with right:
+            st.markdown("#### 🧠 Why?")
+            shap_cards(p["shap"],rt1,rt2,c1c,c2c)
+
+        st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+
+        # ── WEATHER IMPACT ANALYSIS ────────────────────────────────────────────────
+        st.markdown("#### 🌤️ Weather & Conditions Impact")
+        pw = p  # alias for readability
+
+        # Determine batting team
+        batting_first = pw.get("batting_first","Unknown")
+        chasing_team  = pw["team2"] if batting_first==pw["team1"] else pw["team1"] if batting_first==pw["team2"] else "Unknown"
+        bf_short  = TEAM_META.get(batting_first,{}).get("short",batting_first)
+        ch_short  = TEAM_META.get(chasing_team,{}).get("short",chasing_team)
+        bf_color  = TEAM_META.get(batting_first,{}).get("color","#fff")
+        ch_color  = TEAM_META.get(chasing_team,{}).get("color","#fff")
+
+        # Compute weather impact signals
+        signals  = []
+        warnings = []
+
+        # DEW factor
+        if pw["dew_val"] == 2:
+            signals.append(("🔴 Heavy Dew Expected", f"Significant advantage for <b style='color:{ch_color}'>{ch_short}</b> (chasing). Ball becomes wet and difficult to grip for bowlers. Spinners especially affected. Chasing team scores easier in 2nd innings.", "high"))
+            warnings.append("heavy_dew")
+        elif pw["dew_val"] == 1:
+            signals.append(("🟡 Moderate Dew", f"Mild advantage for <b style='color:{ch_color}'>{ch_short}</b> (chasing) in later overs. Monitor dew situation at ground.", "medium"))
+
+        # Evening match
+        if pw["is_evening"]:
+            if pw["dew_val"] > 0:
+                signals.append(("🌙 Evening + Dew Combination", "Evening matches with dew are the strongest chasing advantage in T20 cricket. Dew makes the ball skid onto the bat in the 2nd innings.", "high"))
+        else:
+            signals.append(("🌅 Afternoon Match", "Day match — no dew expected. Pitch behaviour more neutral. Pacers may get more assistance in the first hour.", "neutral"))
+
+        # Weather conditions
+        if "Rain" in pw["weather"]:
+            signals.append(("🌧️ Rain Risk", "Match may be interrupted. DLS calculation could come into play — this fundamentally changes target and strategy. Higher uncertainty in prediction.", "high"))
+        elif "Overcast" in pw["weather"]:
+            signals.append(("☁️ Overcast Conditions", "Cloud cover aids swing bowling, especially in early overs. Pace bowlers with the new ball get more assistance. Toss to field might be more valuable.", "medium"))
+        elif "Partly" in pw["weather"]:
+            signals.append(("⛅ Partly Cloudy", "Mixed conditions — some swing early, likely to clear up. Moderate impact on play.", "low"))
+        else:
+            signals.append(("☀️ Clear Conditions", "No weather disruption expected. Pitch and ground conditions are the primary factors today.", "neutral"))
+
+        # Temperature
+        if pw["temp"] >= 38:
+            signals.append(("🌡️ Very High Temperature", f"{pw['temp']}°C — Extreme heat affects outfield pace (ball races to boundary), player fitness in death overs, and swing (hot air reduces swing). High-scoring match likely.", "medium"))
+        elif pw["temp"] <= 20:
+            signals.append(("🌡️ Cool Conditions", f"{pw['temp']}°C — Cooler weather assists swing and seam movement significantly. Lower-scoring match possible. Pacers benefit.", "medium"))
+
+        # Humidity
+        if pw["humidity"] == "High" and pw["is_evening"]:
+            signals.append(("💦 High Humidity + Evening", "Combination increases dew probability and aids swing. Ball may do more than expected for pacers throughout the match.", "medium"))
+
+        # Render signals
+        wc_cols = st.columns(2)
+        for i, (title, detail, level) in enumerate(signals):
+            color = "#F87171" if level=="high" else "#FACC15" if level=="medium" else "#60A5FA" if level=="low" else "#4ADE80"
+            bg    = "rgba(248,113,113,0.06)" if level=="high" else "rgba(250,204,21,0.06)" if level=="medium" else "rgba(96,165,250,0.06)" if level=="low" else "rgba(74,222,128,0.06)"
+            with wc_cols[i % 2]:
+                st.markdown(
+                    f'<div class="reason-card" style="border-color:{color}33;background:{bg}">'
+                    f'<div style="font-size:12px;font-weight:700;color:{color};margin-bottom:4px">{title}</div>'
+                    f'<div style="font-size:11px;color:#94A3B8;line-height:1.5">{detail}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+        # Overall weather verdict
+        if "heavy_dew" in warnings and pw["is_evening"]:
+            dew_verdict = f"⚠️ Heavy dew + evening match = strong chasing advantage. If <b style='color:{bf_color}'>{bf_short}</b> bats first, they need to post 175+ to negate dew effect at most venues."
+            vbg = "rgba(248,113,113,0.08)"; vbc = "#F87171"
+        elif pw["dew_val"] == 1 and pw["is_evening"]:
+            dew_verdict = f"Moderate dew expected. Slight advantage to <b style='color:{ch_color}'>{ch_short}</b> if chasing. Effect depends on ground and how quickly dew sets in."
+            vbg = "rgba(250,204,21,0.08)"; vbc = "#FACC15"
+        elif "Rain" in pw["weather"]:
+            dew_verdict = "Rain risk adds high uncertainty. DLS may apply — consider this while betting or picking Fantasy teams."
+            vbg = "rgba(248,113,113,0.08)"; vbc = "#F87171"
+        else:
+            dew_verdict = f"Conditions are relatively neutral today. Weather is not a significant swing factor in this prediction. Trust the model's team + form analysis."
+            vbg = "rgba(74,222,128,0.08)"; vbc = "#4ADE80"
+
+        st.markdown(
+            f'<div style="background:{vbg};border:1px solid {vbc}44;border-left:3px solid {vbc};border-radius:10px;padding:12px 16px;margin-top:8px">'
+            f'<div style="font-size:11px;font-weight:700;color:{vbc};margin-bottom:4px">🎯 CONDITIONS VERDICT</div>'
+            f'<div style="font-size:12px;color:#CBD5E1;line-height:1.6">{dew_verdict}</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        # Conditions summary row
+        st.markdown(
+            f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">'
+            f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">{"🌙 Evening" if pw["is_evening"] else "🌅 Afternoon"}</span>'
+            f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">{pw["weather"]}</span>'
+            f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">💧 {pw["dew"]}</span>'
+            f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">🌡️ {pw["temp"]}°C</span>'
+            f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">💦 {pw["humidity"]} Humidity</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+        b1,b2=st.columns(2)
+        with b1:
+            st.markdown("#### 🏏 XII Summary")
+            for tm,xk,ik in [(rt1,"xi1","imp1"),(rt2,"xi2","imp2")]:
+                sm=xi_summary(p[xk]); col=c1c if tm==rt1 else c2c
+                sh=TEAM_META[tm]["short"]; imp=p[ik]; imp_role=get_role(imp) if imp else ""
+                st.markdown(f'<div class="reason-card"><div style="font-size:12px;font-weight:700;color:{col};margin-bottom:4px">{sh}</div><div style="font-size:11px;color:#64748B">🏏{sm["BAT"]} &nbsp;🎯{sm["BOWL"]} &nbsp;⚡{sm["ALL"]} &nbsp;🧤{sm["WK"]}</div>{"<div style=font-size:11px;color:#F59E0B;margin-top:4px;font-weight:600>⚡ "+imp+" ["+imp_role+"]</div>" if imp else ""}</div>',unsafe_allow_html=True)
+        with b2:
+            st.markdown("#### 📈 Match Context")
+            vrows=feature_df[feature_df['venue']==venue]; vtr=vrows['venue_toss_rate'].mean() if len(vrows)>0 else 0.5
+            st.markdown(f'<div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">🎯 Toss</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{p["toss_info"]}</div></div><div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">📍 {venue.split(",")[0]}</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{len(vrows)} IPL matches · Toss→win: {vtr*100:.0f}%</div></div><div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">📊 Form (live Cricinfo)</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{TEAM_META[rt1]["short"]}: {t1_form_val*100:.0f}% &nbsp;·&nbsp; {TEAM_META[rt2]["short"]}: {t2_form_val*100:.0f}%</div></div><div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">🤝 H2H ({TEAM_META[rt1]["short"]})</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{h2h_rate*100:.0f}% · {len(h2h_meetings)} meetings</div></div>',unsafe_allow_html=True)
+
+        st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+        st.caption("📌 Accuracy ~60-63% · ROC-AUC 0.69 · Form & H2H auto from Cricinfo · Data refreshes every 30 min.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TRADE PREDICTOR TAB
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_trade:
+    st.markdown("### 🔄 Trade Predictor")
+    st.caption("Squad needs analysis + live trade rumors — no fake ML predictions, just honest squad math + real news")
+
+    st.markdown(
+        '<div class="reason-card" style="border-color:#D4AF3744;background:rgba(212,175,55,0.04)">'
+        '<div style="font-size:11px;color:#94A3B8;line-height:1.6">'
+        '⚠️ <b style="color:#D4AF37">How this works:</b> There is no historical dataset of "player features → trade outcome" '
+        'large enough to train a real ML model on — trades are rare, human-negotiated events. Instead, this section does two honest things: '
+        '<b>(1)</b> analyzes each squad\'s role balance to flag structural gaps/surplus, and '
+        '<b>(2)</b> surfaces real trade-related headlines from ESPN Cricinfo\'s live news feed. '
+        'Nothing here is a confirmed prediction — always verify against official sources.'
+        '</div></div>',
+        unsafe_allow_html=True
+    )
+    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+
+    # ── SQUAD NEEDS OVERVIEW (all 10 teams) ───────────────────────────────────
+    st.markdown("#### 📋 Squad Needs — All Teams")
+    st.caption("Role balance vs an ideal XI composition (4 BAT · 4 BOWL · 2 ALL · 1 WK)")
+
+    needs_by_team = {}
+    for t in TEAMS:
+        needs_by_team[t] = analyze_team_needs(t, TEAM_SQUADS[t], PLAYER_ROLES)
+
+    needs_cols = st.columns(5)
+    for i, t in enumerate(TEAMS):
+        n = needs_by_team[t]
+        color = TEAM_META[t]["color"]; short = TEAM_META[t]["short"]
+        gap_str = ", ".join(role_display(r) for r in n["gaps"]) if n["gaps"] else "None"
+        sur_str = ", ".join(role_display(r) for r in n["surplus"]) if n["surplus"] else "None"
+        status_color = "#4ADE80" if n["balanced"] else "#FACC15" if len(n["gaps"])==1 else "#F87171"
+        status_text  = "Balanced" if n["balanced"] else f"{len(n['gaps'])} gap(s)"
+
+        with needs_cols[i % 5]:
             st.markdown(
-                f'<div class="reason-card" style="border-color:{color}33;background:{bg}">'
-                f'<div style="font-size:12px;font-weight:700;color:{color};margin-bottom:4px">{title}</div>'
-                f'<div style="font-size:11px;color:#94A3B8;line-height:1.5">{detail}</div>'
+                f'<div class="reason-card">'
+                f'<div style="font-size:12px;font-weight:800;color:{color};margin-bottom:4px">{short}</div>'
+                f'<div style="font-size:10px;color:{status_color};font-weight:700;margin-bottom:6px">● {status_text}</div>'
+                f'<div style="font-size:10px;color:#64748B">🏏{n["counts"]["BAT"]} 🎯{n["counts"]["BOWL"]} ⚡{n["counts"]["ALL"]} 🧤{n["counts"]["WK"]}</div>'
+                f'<div style="font-size:9px;color:#F87171;margin-top:6px">Gap: {gap_str}</div>'
+                f'<div style="font-size:9px;color:#4ADE80;margin-top:2px">Surplus: {sur_str}</div>'
                 f'</div>',
                 unsafe_allow_html=True
             )
 
-    # Overall weather verdict
-    if "heavy_dew" in warnings and pw["is_evening"]:
-        dew_verdict = f"⚠️ Heavy dew + evening match = strong chasing advantage. If <b style='color:{bf_color}'>{bf_short}</b> bats first, they need to post 175+ to negate dew effect at most venues."
-        vbg = "rgba(248,113,113,0.08)"; vbc = "#F87171"
-    elif pw["dew_val"] == 1 and pw["is_evening"]:
-        dew_verdict = f"Moderate dew expected. Slight advantage to <b style='color:{ch_color}'>{ch_short}</b> if chasing. Effect depends on ground and how quickly dew sets in."
-        vbg = "rgba(250,204,21,0.08)"; vbc = "#FACC15"
-    elif "Rain" in pw["weather"]:
-        dew_verdict = "Rain risk adds high uncertainty. DLS may apply — consider this while betting or picking Fantasy teams."
-        vbg = "rgba(248,113,113,0.08)"; vbc = "#F87171"
+    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+
+    # ── TRADE COMPATIBILITY CHECKER ───────────────────────────────────────────
+    st.markdown("#### 🤝 Trade Compatibility Checker")
+    st.caption("Pick two teams — see if their squad needs structurally complement each other")
+
+    tc1, tc2, tc3 = st.columns([4,1,4])
+    with tc1:
+        trade_team_a = st.selectbox("Team A", TEAMS, index=0, key="trade_team_a")
+    with tc2:
+        st.markdown("<div style='padding-top:28px;text-align:center;color:#475569;font-weight:800;font-size:16px'>⇄</div>", unsafe_allow_html=True)
+    with tc3:
+        trade_team_b = st.selectbox("Team B", [t for t in TEAMS if t != trade_team_a], index=0, key="trade_team_b")
+
+    needs_a = needs_by_team[trade_team_a]
+    needs_b = needs_by_team[trade_team_b]
+    compat  = compute_trade_compatibility(trade_team_a, trade_team_b, needs_a, needs_b)
+
+    a_color = TEAM_META[trade_team_a]["color"]; a_short = TEAM_META[trade_team_a]["short"]
+    b_color = TEAM_META[trade_team_b]["color"]; b_short = TEAM_META[trade_team_b]["short"]
+
+    score_color = "#4ADE80" if compat["score_pct"] >= 50 else "#FACC15" if compat["score_pct"] >= 25 else "#F87171"
+
+    st.markdown(
+        f'<div class="winner-banner" style="padding:1.2rem">'
+        f'<div style="font-size:11px;letter-spacing:0.15em;color:#D4AF37;margin-bottom:8px;font-weight:700">SQUAD COMPATIBILITY</div>'
+        f'<div style="font-size:28px;font-weight:900;color:{score_color}">{compat["score_pct"]}%</div>'
+        f'<div style="font-size:11px;color:#64748B;margin-top:4px">{"Strong structural fit" if compat["mutual"] else "Limited structural overlap" if compat["score"]>0 else "No clear role-based fit"}</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        if compat["a_to_b"]:
+            roles_str = ", ".join(role_display(r) for r in compat["a_to_b"])
+            st.markdown(
+                f'<div class="reason-card">'
+                f'<div style="font-size:11px;color:{a_color};font-weight:700">→ {a_short} has spare {roles_str}</div>'
+                f'<div style="font-size:11px;color:#94A3B8;margin-top:2px">which {b_short} currently lacks</div>'
+                f'</div>', unsafe_allow_html=True
+            )
+        else:
+            st.markdown(f'<div class="reason-card"><div style="font-size:11px;color:#475569">{a_short} has no surplus that fills {b_short}\'s gaps</div></div>', unsafe_allow_html=True)
+    with cc2:
+        if compat["b_to_a"]:
+            roles_str = ", ".join(role_display(r) for r in compat["b_to_a"])
+            st.markdown(
+                f'<div class="reason-card">'
+                f'<div style="font-size:11px;color:{b_color};font-weight:700">→ {b_short} has spare {roles_str}</div>'
+                f'<div style="font-size:11px;color:#94A3B8;margin-top:2px">which {a_short} currently lacks</div>'
+                f'</div>', unsafe_allow_html=True
+            )
+        else:
+            st.markdown(f'<div class="reason-card"><div style="font-size:11px;color:#475569">{b_short} has no surplus that fills {a_short}\'s gaps</div></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
+
+    # ── LIVE TRADE RUMOR MILL ─────────────────────────────────────────────────
+    st.markdown("#### 📰 Live Trade News")
+    st.caption("Pulled from ESPN Cricinfo's RSS feed, filtered for IPL + trade keywords · refreshes every 30 min")
+
+    rumor_col1, rumor_col2 = st.columns([5,1])
+    with rumor_col2:
+        if st.button("🔄 Refresh", key="refresh_rumors", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    with st.spinner("Fetching live news..."):
+        rumors = fetch_trade_rumors(TEAMS)
+
+    if rumors:
+        for r in rumors:
+            clean_link = clean_rss_link(r["link"])
+            src = r.get("source", "")
+            st.markdown(
+                f'<div class="reason-card">'
+                f'<div style="display:flex;justify-content:space-between;align-items:flex-start">'
+                f'<div style="font-size:12px;font-weight:700;color:#E2E8F0;margin-bottom:4px;flex:1">{r["title"]}</div>'
+                f'<span style="font-size:9px;color:#475569;background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:4px;white-space:nowrap;margin-left:8px">{src}</span>'
+                f'</div>'
+                f'<div style="font-size:11px;color:#94A3B8;margin-bottom:6px">{r["description"]}</div>'
+                f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                f'<a href="{clean_link}" target="_blank" style="font-size:10px;color:#60A5FA;text-decoration:none">Read more →</a>'
+                f'<span style="font-size:10px;color:#475569">{r["pub_date"]}</span>'
+                f'</div></div>',
+                unsafe_allow_html=True
+            )
     else:
-        dew_verdict = f"Conditions are relatively neutral today. Weather is not a significant swing factor in this prediction. Trust the model's team + form analysis."
-        vbg = "rgba(74,222,128,0.08)"; vbc = "#4ADE80"
-
-    st.markdown(
-        f'<div style="background:{vbg};border:1px solid {vbc}44;border-left:3px solid {vbc};border-radius:10px;padding:12px 16px;margin-top:8px">'
-        f'<div style="font-size:11px;font-weight:700;color:{vbc};margin-bottom:4px">🎯 CONDITIONS VERDICT</div>'
-        f'<div style="font-size:12px;color:#CBD5E1;line-height:1.6">{dew_verdict}</div>'
-        f'</div>',
-        unsafe_allow_html=True
-    )
-
-    # Conditions summary row
-    st.markdown(
-        f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">'
-        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">{"🌙 Evening" if pw["is_evening"] else "🌅 Afternoon"}</span>'
-        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">{pw["weather"]}</span>'
-        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">💧 {pw["dew"]}</span>'
-        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">🌡️ {pw["temp"]}°C</span>'
-        f'<span style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 10px;font-size:11px;color:#94A3B8">💦 {pw["humidity"]} Humidity</span>'
-        f'</div>',
-        unsafe_allow_html=True
-    )
+        st.markdown(
+            '<div class="reason-card" style="text-align:center;padding:2rem">'
+            '<div style="font-size:13px;color:#64748B">No trade-related headlines found right now.</div>'
+            '<div style="font-size:11px;color:#475569;margin-top:6px">Either there\'s no active trade-window news at the moment, or the news source is temporarily unreachable from this server. Click Refresh to retry, or check ESPN Cricinfo / CricTracker directly.</div>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
     st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-    b1,b2=st.columns(2)
-    with b1:
-        st.markdown("#### 🏏 XII Summary")
-        for tm,xk,ik in [(rt1,"xi1","imp1"),(rt2,"xi2","imp2")]:
-            sm=xi_summary(p[xk]); col=c1c if tm==rt1 else c2c
-            sh=TEAM_META[tm]["short"]; imp=p[ik]; imp_role=get_role(imp) if imp else ""
-            st.markdown(f'<div class="reason-card"><div style="font-size:12px;font-weight:700;color:{col};margin-bottom:4px">{sh}</div><div style="font-size:11px;color:#64748B">🏏{sm["BAT"]} &nbsp;🎯{sm["BOWL"]} &nbsp;⚡{sm["ALL"]} &nbsp;🧤{sm["WK"]}</div>{"<div style=font-size:11px;color:#F59E0B;margin-top:4px;font-weight:600>⚡ "+imp+" ["+imp_role+"]</div>" if imp else ""}</div>',unsafe_allow_html=True)
-    with b2:
-        st.markdown("#### 📈 Match Context")
-        vrows=feature_df[feature_df['venue']==venue]; vtr=vrows['venue_toss_rate'].mean() if len(vrows)>0 else 0.5
-        st.markdown(f'<div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">🎯 Toss</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{p["toss_info"]}</div></div><div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">📍 {venue.split(",")[0]}</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{len(vrows)} IPL matches · Toss→win: {vtr*100:.0f}%</div></div><div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">📊 Form (live Cricinfo)</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{TEAM_META[rt1]["short"]}: {t1_form_val*100:.0f}% &nbsp;·&nbsp; {TEAM_META[rt2]["short"]}: {t2_form_val*100:.0f}%</div></div><div class="reason-card"><div style="font-size:11px;color:#64748B;margin-bottom:2px">🤝 H2H ({TEAM_META[rt1]["short"]})</div><div style="font-size:13px;color:#E2E8F0;font-weight:600">{h2h_rate*100:.0f}% · {len(h2h_meetings)} meetings</div></div>',unsafe_allow_html=True)
-
-    st.markdown('<div class="divider"></div>',unsafe_allow_html=True)
-    st.caption("📌 Accuracy ~60-63% · ROC-AUC 0.69 · Form & H2H auto from Cricinfo · Data refreshes every 30 min.")
+    st.caption("📌 Squad needs are computed from current role counts only (no performance weighting). News sourced live from ESPN Cricinfo RSS — always confirm with official IPL/team announcements before treating any rumor as fact.")
